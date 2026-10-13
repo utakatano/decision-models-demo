@@ -1,0 +1,40 @@
+# Defense in depth for command requests. No blanket allow rules.
+# These are prefix rules, not a complete shell/interpreter security boundary.
+prefix_rule(
+    pattern = [["sudo", "doas", "rm", "rmdir", "shred", "dd", "mkfs"]],
+    decision = "forbidden",
+    justification = "Privilege escalation and destructive commands are outside demo work. Use a reviewable file patch instead.",
+    match = ["sudo whoami", "rm -rf public", "dd if=/dev/zero of=sample"],
+    not_match = ["rg TODO"],
+)
+prefix_rule(
+    pattern = ["git", ["reset", "clean", "restore"]],
+    decision = "forbidden",
+    justification = "Do not discard user changes or rewrite repository state. Use a reviewable patch.",
+    match = ["git reset --hard", "git clean -fd", "git restore ."],
+    not_match = ["git status --short", "git diff"],
+)
+prefix_rule(
+    pattern = ["git", ["push", "commit", "checkout", "switch", "rebase", "merge", "config", "remote"]],
+    decision = "prompt",
+    justification = "Repository state changes and publication require explicit approval for the specific operation.",
+    match = ["git push origin main", "git commit -m demo"],
+)
+prefix_rule(
+    pattern = [["pnpm", "npm", "npx", "yarn", "bun", "corepack", "pip", "pip3", "uv", "brew"]],
+    decision = "prompt",
+    justification = "Review dependency installation or package command before allowing execution outside the sandbox.",
+    match = ["pnpm add react", "npx create-next-app", "pip install package"],
+)
+prefix_rule(
+    pattern = [["curl", "wget", "ssh", "scp", "rsync", "gh", "docker", "kubectl", "terraform", "vercel", "wrangler"]],
+    decision = "prompt",
+    justification = "Network access, remote changes and infrastructure operations require explicit scope approval.",
+    match = ["curl https://example.com", "gh pr create", "vercel deploy"],
+)
+prefix_rule(
+    pattern = [["sh", "bash", "zsh", "fish", "python", "python3", "node", "ruby", "perl", "osascript", "env"]],
+    decision = "prompt",
+    justification = "Shells and interpreters can hide filesystem or network effects. Review the complete script before execution outside the sandbox.",
+    match = ["python3 -c pass", "bash -lc echo", "node script.js"],
+)

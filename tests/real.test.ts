@@ -1,0 +1,80 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { adapterRequest, callReal, parseAnswers, publicConfig } from '../lib/real-adapters.ts';
+import { validateReal, jpegInput, readJson, type RealInput } from '../lib/real-validation.ts';
+import { handleReal } from '../lib/real-handler.ts';
+import { videoQuestionIds } from '../lib/decision-policy.ts';
+import { profiles, threads, tags, actions, reasons, CRITERIA_VERSION } from '../lib/fixtures.ts';
+const env = { TYPESAFE_API_KEY: 'test-only', OPENAI_API_KEY: 'test-only', LIQUID_API_KEY: 'test-only', CLOUDFLARE_API_TOKEN: 'test-only', CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32) };
+const relevance = { kind: 'relevance', mode: 'real', criteria: CRITERIA_VERSION, model: 'jev', profile: profiles[0], thread: threads[0] };
+const input = validateReal(relevance);
+const answers = { relevance: { type: 'score', score: 3 }, action: { type: 'choice', choice: actions[0] }, reason: { type: 'choice', choice: reasons[0] } };
+const image = 'data:image/jpeg;base64,' + Buffer.from([255,216,255,192,0,8,8,0,10,0,10,1,255,217]).toString('base64');
+const video = { kind: 'video', mode: 'real', criteria: CRITERIA_VERSION, model: 'd1', duration: 24, total: 24, time: 0, frameId: 'frame-0', image };
+const videoAnswers = Object.fromEntries(videoQuestionIds.map(t => [t, { type: 'choice', choice: 'あり' }]));
+function request(body: unknown, origin = 'http://127.0.0.1:3001') { return new Request('http://127.0.0.1:3001/api/decide', { method: 'POST', headers: { origin, host: '127.0.0.1:3001', 'content-type': 'application/json' }, body: JSON.stringify(body) }); }
+const fake: typeof fetch = async () => Response.json({ answers });
+test('all four adapters use official endpoints and provider-specific payloads without gold labels', () => {
+  const jev = adapterRequest(input, env);
+  assert.equal(jev.url, 'https://api.typesafe.ai/v1/systemone');
+  const j = jev.body as { state: { thread: object }; questions: object };
+  assert.equal(Object.hasOwn(j.state.thread, 'caseIndex'), false);
+  assert.equal(Object.hasOwn(j.state.thread, 'id'), false);
+  const openai = adapterRequest({ ...input, model: 'decisions' } as RealInput, env);
+  assert.equal(openai.url, 'https://api.openai.com/v1/decisions');
+  const o = openai.body as { input: string; questions: { name: string; levels?: unknown[] }[] };
+  assert.equal(o.questions.length, 3); assert.equal(o.questions[0].levels?.length, 5); assert.equal(typeof o.input, 'string');
+  const d1 = adapterRequest(validateReal(video), env);
+  assert.equal(d1.url, 'https://api.liquid.ai/decisions/v1/systemone');
+  const v = d1.body as { images: string[]; state: object };
+  assert.ok(Object.keys((d1.body as { questions: object }).questions).every(id => /^[a-z0-9_]+$/.test(id)));
+  assert.deepEqual(v.images, [image]); assert.equal(Object.hasOwn(v.state, 'time'), false);
+  const clef = adapterRequest(validateReal({ ...video, model: 'clef' }), env);
+  assert.equal(clef.url, `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/cloudflare/clef-flash`);
+  assert.throws(() => adapterRequest(validateReal({ ...video, model: 'clef' }), { ...env, CLOUDFLARE_ACCOUNT_ID: '../redirect' }));
+});
+test('all provider responses normalize score and choices, rejecting refusal and invalid answers', () => {
+  assert.equal((parseAnswers(input, { answers }) as { relevance: number }).relevance, 75);
+  assert.equal((parseAnswers({ ...input, model: 'decisions' } as RealInput, { answers: Object.entries(answers).map(([name, value]) => ({ name, ...value })) }) as { relevance: number }).relevance, 75);
+  assert.deepEqual(parseAnswers(validateReal(video), { answers: videoAnswers }), Object.fromEntries(tags.map(t => [t, 'あり'])));
+  assert.deepEqual(parseAnswers(validateReal({ ...video, model: 'clef' }), { success: true, result: { answers: videoAnswers } }), Object.fromEntries(tags.map(t => [t, 'あり'])));
+  for (const payload of [null, {}, { answers: { ...answers, relevance: { type: 'score', score: 5 } } }, { answers: { ...answers, action: { type: 'choice', choice: 'unknown' } } }]) assert.throws(() => parseAnswers(input, payload), { status: 502 });
+  assert.throws(() => parseAnswers({ ...input, model: 'decisions' } as RealInput, { answers: [{ name: 'relevance', type: 'refusal' }] }), { status: 502 });
+});
+test('input limits reject modified fixtures, excess frames and malformed images; edited profiles are accepted', async () => {
+  assert.equal(validateReal({ ...relevance, profile: { ...profiles[0], role: 'Edited sample role' } }).kind, 'relevance');
+  assert.throws(() => validateReal({ ...relevance, thread: { ...threads[0], title: 'changed' } }));
+  assert.throws(() => validateReal({ ...video, total: 31 }));
+  assert.throws(() => validateReal({ ...video, time: 24 }));
+  assert.throws(() => validateReal({ ...relevance, profile: { ...profiles[0], name: 'x'.repeat(101) } }));
+  assert.throws(() => jpegInput('data:image/png;base64,abcd'));
+  assert.throws(() => jpegInput(image.replace('base64,', 'base64,===')));
+  await assert.rejects(readJson(request({ large: 'x'.repeat(100) }), 20), { status: 413 });
+});
+test('real handler rejects cross-origin and invalid inputs before network; responses never expose keys', async () => {
+  let calls = 0; const fetcher: typeof fetch = async (...args) => { calls++; return fake(...args); };
+  assert.equal((await handleReal(request(relevance, 'https://example.com'), env, fetcher)).status, 403);
+  assert.equal((await handleReal(request({ ...relevance, mode: 'mock' }), env, fetcher)).status, 422);
+  assert.equal(calls, 0);
+  const response = await handleReal(request(relevance), env, fetcher);
+  assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+  const text = await response.text(); assert.equal(text.includes('test-only'), false); assert.equal(JSON.parse(text).mode, 'real');
+  assert.equal(JSON.stringify(publicConfig(env)).includes('test-only'), false);
+  assert.equal((await handleReal(request(relevance), {}, fetcher)).status, 503);
+});
+test('provider failures are redacted and fetch enforces deadline, no-store and redirect rejection', async () => {
+  const fetcher: typeof fetch = async (_url, init) => { assert.equal(init?.redirect, 'error'); assert.equal(init?.cache, 'no-store'); assert.ok(init?.signal); return new Response('test-only private body', { status: 401 }); };
+  const response = await handleReal(request(relevance), env, fetcher);
+  assert.equal(response.status, 502); assert.equal((await response.text()).includes('test-only'), false);
+  await assert.rejects(callReal(input, env, new AbortController().signal, async () => new Response('not json')), { status: 502 });
+  await assert.rejects(callReal(input, env, new AbortController().signal, async () => new Response('x'.repeat(262145))), { status: 502 });
+});
+test('server concurrency is capped at four relevance calls and released afterwards', async () => {
+  let release!: () => void; const gate = new Promise<void>(r => { release = r; }); let active = 0;
+  const fetcher: typeof fetch = async () => { active++; await gate; return fake('https://example.invalid'); };
+  const pending = Array.from({ length: 4 }, () => handleReal(request(relevance), env, fetcher));
+  while (active < 4) await new Promise(r => setTimeout(r, 1));
+  assert.equal((await handleReal(request(relevance), env, fetcher)).status, 429);
+  release(); assert.deepEqual((await Promise.all(pending)).map(r => r.status), [200,200,200,200]);
+  assert.equal((await handleReal(request(relevance), env, fake)).status, 200);
+});

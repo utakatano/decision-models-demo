@@ -1,0 +1,7 @@
+packages:
+  - '.'
+ignoreScripts: true
+saveExact: true
+minimumReleaseAge: 10080
+strictPeerDependencies: true
+verifyStoreIntegrity: true

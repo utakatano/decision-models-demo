@@ -1,0 +1,21 @@
+# Project-scoped defaults. Loaded only for a trusted project on a new session.
+# Managed policy and explicitly selected session permissions take precedence.
+approval_policy = "on-request"
+approvals_reviewer = "user"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = false
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[shell_environment_policy]
+inherit = "core"
+exclude = ["*_API_KEY", "*_API_TOKEN", "*_SECRET", "*_PASSWORD", "AWS_*", "GH_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN"]
+
+[apps._default]
+enabled = false
+destructive_enabled = false
+open_world_enabled = false
+default_tools_approval_mode = "prompt"
+approvals_reviewer = "user"
